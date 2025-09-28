@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { type Address, parseEventLogs, Log } from "viem";
+import { type Address, parseEventLogs, Log, verifyMessage } from "viem";
 import { publicClient, walletClient } from "@/lib/providers";
 import {
   CONTRACT_ABI,
@@ -7,7 +7,6 @@ import {
   RELAYER_ADDRESS,
 } from "@/lib/contract";
 import { worldchain } from "@/lib/providers";
-import { checkAuthSignatureAndMessage } from "@/lib/auth";
 import { BaseError, ContractFunctionRevertedError } from "viem";
 import { sendWebhookMessage } from "@/lib/webhook";
 
@@ -23,6 +22,50 @@ interface CreateTeamRequest {
 (BigInt.prototype as any).toJSON = function () {
   return this.toString();
 };
+
+// Server-side signature verification function
+async function checkAuthSignatureAndMessageServer(
+  signature: string,
+  message: string,
+  walletAddress: string
+): Promise<{ isValid: boolean; error?: string; timestamp?: number; expiresAt?: number }> {
+  try {
+    // Parse the message to extract timestamp
+    const messageMatch = message.match(/Timestamp: (\d+)/);
+    if (!messageMatch) {
+      return { isValid: false, error: "Invalid message format: missing timestamp" };
+    }
+    
+    const timestamp = parseInt(messageMatch[1]);
+    const currentTime = Math.floor(Date.now() / 1000);
+    
+    // Check if message is expired (5 minutes = 300 seconds)
+    const MESSAGE_EXPIRY = 300;
+    if (currentTime - timestamp > MESSAGE_EXPIRY) {
+      return { isValid: false, error: "Message has expired" };
+    }
+    
+    // Verify the signature using viem's verifyMessage
+    const isValid = await verifyMessage({
+      address: walletAddress as Address,
+      message,
+      signature: signature as `0x${string}`,
+    });
+    
+    if (!isValid) {
+      return { isValid: false, error: "Invalid signature" };
+    }
+    
+    return {
+      isValid: true,
+      timestamp,
+      expiresAt: timestamp + MESSAGE_EXPIRY,
+    };
+  } catch (error) {
+    console.error("Error verifying signature:", error);
+    return { isValid: false, error: "Failed to verify signature" };
+  }
+}
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
@@ -90,8 +133,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
 
+    // Use the server-side auth check function
     const { isValid, error, timestamp, expiresAt } =
-      await checkAuthSignatureAndMessage(signature, message, walletAddress);
+      await checkAuthSignatureAndMessageServer(signature, message, walletAddress);
     if (!isValid) {
       return NextResponse.json(
         { success: false, error: error },
