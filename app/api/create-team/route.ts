@@ -129,7 +129,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // Parse event logs
     const logs = parseEventLogs({
       abi: CONTRACT_ABI,
-      logs: receipt.logs,
+      logs: receipt.logs || [],
     });
 
     // Send webhook notification
