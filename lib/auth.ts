@@ -120,7 +120,7 @@ export const signMessageWithWorldApp = async (
     if (finalPayload.status === "success") {
       return finalPayload.signature;
     } else {
-      console.error("World App sign message failed:", finalPayload.error);
+      console.error("World App sign message failed:", finalPayload.status);
       return null;
     }
   } catch (error) {
