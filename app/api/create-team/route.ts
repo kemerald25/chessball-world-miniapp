@@ -6,7 +6,7 @@ import {
   CONTRACT_ADDRESS,
   RELAYER_ADDRESS,
 } from "@/lib/contract";
-import { worldchain } from "@/lib/providers";
+import { worldchain } from "viem/chains"; // Use viem's worldchain, not your local one
 import { BaseError, ContractFunctionRevertedError } from "viem";
 import { sendWebhookMessage } from "@/lib/webhook";
 
@@ -23,6 +23,12 @@ interface CreateTeamRequest {
   return this.toString();
 };
 
+// Create a dedicated client for EIP-1271 verification (same as complete-siwe)
+const worldchainVerificationClient = createPublicClient({
+  chain: worldchain,
+  transport: http(),
+});
+
 // EIP-1271 signature verification for Safe/Smart Contract wallets
 async function verifyEIP1271Signature(
   contractAddress: string,
@@ -30,7 +36,7 @@ async function verifyEIP1271Signature(
   signature: string,
 ): Promise<boolean> {
   try {
-    const result = await publicClient.readContract({
+    const result = await worldchainVerificationClient.readContract({
       address: contractAddress as `0x${string}`,
       abi: [
         {
@@ -121,6 +127,11 @@ async function checkAuthSignatureAndMessageServer(
     // Try EIP-1271 verification for Smart Contract wallets (World App)
     try {
       const messageHash = hashMessage(message);
+      console.log("Attempting EIP-1271 verification with:", {
+        address: walletAddress,
+        messageHash,
+      });
+      
       isValid = await verifyEIP1271Signature(walletAddress, messageHash, signature);
       
       if (isValid) {
@@ -209,6 +220,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     // Use the server-side auth check function with EIP-1271 support
+    console.log("Starting signature verification...");
     const { isValid, error, timestamp, expiresAt } =
       await checkAuthSignatureAndMessageServer(signature, message, walletAddress);
     if (!isValid) {
@@ -228,7 +240,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       abi: CONTRACT_ABI,
       functionName: "createTeamRelayer",
       args: [walletAddress as Address, teamName, countryId],
-      chain: worldchain,
       account: RELAYER_ADDRESS,
     });
 
@@ -263,7 +274,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       countryId,
       contractAddress: CONTRACT_ADDRESS,
       isWorldAppUser,
-      chainId: worldchain.id,
     });
 
     console.log("Transaction confirmed successfully:", receipt.transactionHash);
@@ -274,7 +284,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       transactionHash: receipt.transactionHash,
       blockNumber: receipt.blockNumber.toString(),
       gasUsed: receipt.gasUsed.toString(),
-      chainId: worldchain.id,
     });
   } catch (error) {
     console.error("Error in create-team API:", error);
@@ -365,8 +374,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       {
         success: false,
         error: errorMessage,
-        chainId: worldchain.id,
-        network: "Worldchain",
       },
       { status: 500 },
     );
