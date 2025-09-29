@@ -24,19 +24,28 @@ interface CreateTeamRequest {
 };
 
 // Server-side signature verification function
+// Fixed server-side signature verification function
 async function checkAuthSignatureAndMessageServer(
   signature: string,
   message: string,
   walletAddress: string
 ): Promise<{ isValid: boolean; error?: string; timestamp?: number; expiresAt?: number }> {
   try {
-    // Parse the message to extract timestamp
-    const messageMatch = message.match(/Timestamp: (\d+)/);
-    if (!messageMatch) {
-      return { isValid: false, error: "Invalid message format: missing timestamp" };
+    // Parse SIWE message format - look for "Issued At:" field
+    const issuedAtMatch = message.match(/Issued At: ([^\n]+)/);
+    if (!issuedAtMatch) {
+      return { isValid: false, error: "Invalid message format: missing Issued At field" };
     }
     
-    const timestamp = parseInt(messageMatch[1]);
+    // Parse the ISO timestamp
+    const issuedAtStr = issuedAtMatch[1];
+    const issuedAt = new Date(issuedAtStr);
+    
+    if (isNaN(issuedAt.getTime())) {
+      return { isValid: false, error: "Invalid timestamp format" };
+    }
+    
+    const timestamp = Math.floor(issuedAt.getTime() / 1000);
     const currentTime = Math.floor(Date.now() / 1000);
     
     // Check if message is expired (5 minutes = 300 seconds)
