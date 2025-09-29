@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { type Address, parseEventLogs, Log, verifyMessage } from "viem";
+import { type Address, parseEventLogs, Log, verifyMessage, hashMessage, createPublicClient, http } from "viem";
 import { publicClient, walletClient } from "@/lib/providers";
 import {
   CONTRACT_ABI,
@@ -16,15 +16,48 @@ interface CreateTeamRequest {
   message: string;
   teamName: string;
   countryId: number;
-  isWorldAppUser?: boolean; // Optional flag to identify World App users
+  isWorldAppUser?: boolean;
 }
 
 (BigInt.prototype as any).toJSON = function () {
   return this.toString();
 };
 
-// Server-side signature verification function
-// Fixed server-side signature verification function
+// EIP-1271 signature verification for Safe/Smart Contract wallets
+async function verifyEIP1271Signature(
+  contractAddress: string,
+  messageHash: string,
+  signature: string,
+): Promise<boolean> {
+  try {
+    const result = await publicClient.readContract({
+      address: contractAddress as `0x${string}`,
+      abi: [
+        {
+          name: "isValidSignature",
+          type: "function",
+          stateMutability: "view",
+          inputs: [
+            { name: "hash", type: "bytes32" },
+            { name: "signature", type: "bytes" },
+          ],
+          outputs: [{ name: "", type: "bytes4" }],
+        },
+      ],
+      functionName: "isValidSignature",
+      args: [messageHash as `0x${string}`, signature as `0x${string}`],
+    });
+
+    // EIP-1271 magic value for valid signature
+    const EIP1271_MAGIC_VALUE = "0x1626ba7e";
+    return result === EIP1271_MAGIC_VALUE;
+  } catch (error) {
+    console.log("EIP-1271 verification failed:", error);
+    return false;
+  }
+}
+
+// Server-side signature verification function with EIP-1271 support
 async function checkAuthSignatureAndMessageServer(
   signature: string,
   message: string,
@@ -53,23 +86,56 @@ async function checkAuthSignatureAndMessageServer(
     if (currentTime - timestamp > MESSAGE_EXPIRY) {
       return { isValid: false, error: "Message has expired" };
     }
-    
-    // Verify the signature using viem's verifyMessage
-    const isValid = await verifyMessage({
-      address: walletAddress as Address,
-      message,
-      signature: signature as `0x${string}`,
-    });
-    
-    if (!isValid) {
-      return { isValid: false, error: "Invalid signature" };
+
+    // Check expiration time from SIWE message
+    const expirationMatch = message.match(/Expiration Time: (.+)/);
+    if (expirationMatch) {
+      const expirationTime = new Date(expirationMatch[1]);
+      const now = new Date();
+      if (expirationTime < now) {
+        return { isValid: false, error: "SIWE message has expired" };
+      }
     }
     
-    return {
-      isValid: true,
-      timestamp,
-      expiresAt: timestamp + MESSAGE_EXPIRY,
-    };
+    // Try standard EOA verification first
+    let isValid = false;
+    try {
+      isValid = await verifyMessage({
+        address: walletAddress as Address,
+        message,
+        signature: signature as `0x${string}`,
+      });
+      
+      if (isValid) {
+        console.log("✓ EOA signature verification passed");
+        return {
+          isValid: true,
+          timestamp,
+          expiresAt: timestamp + MESSAGE_EXPIRY,
+        };
+      }
+    } catch (error) {
+      console.log("EOA verification failed, trying EIP-1271...");
+    }
+
+    // Try EIP-1271 verification for Smart Contract wallets (World App)
+    try {
+      const messageHash = hashMessage(message);
+      isValid = await verifyEIP1271Signature(walletAddress, messageHash, signature);
+      
+      if (isValid) {
+        console.log("✓ EIP-1271 signature verification passed");
+        return {
+          isValid: true,
+          timestamp,
+          expiresAt: timestamp + MESSAGE_EXPIRY,
+        };
+      }
+    } catch (error) {
+      console.log("EIP-1271 verification failed:", error);
+    }
+    
+    return { isValid: false, error: "Invalid signature - all verification methods failed" };
   } catch (error) {
     console.error("Error verifying signature:", error);
     return { isValid: false, error: "Failed to verify signature" };
@@ -142,15 +208,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // Use the server-side auth check function
+    // Use the server-side auth check function with EIP-1271 support
     const { isValid, error, timestamp, expiresAt } =
       await checkAuthSignatureAndMessageServer(signature, message, walletAddress);
     if (!isValid) {
+      console.log("Signature verification failed:", error);
       return NextResponse.json(
         { success: false, error: error },
         { status: 401 },
       );
     }
+
+    console.log("✓ Signature verification successful");
 
     // Simulate the transaction first using publicClient on worldchain
     console.log("Simulating transaction on Worldchain...");
@@ -159,7 +228,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       abi: CONTRACT_ABI,
       functionName: "createTeamRelayer",
       args: [walletAddress as Address, teamName, countryId],
-      chain: worldchain, // Changed from base to worldchain
+      chain: worldchain,
       account: RELAYER_ADDRESS,
     });
 
@@ -258,7 +327,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               },
               { status: 403 },
             );
-          // add more custom error handlers here as needed
           default:
             break;
         }
